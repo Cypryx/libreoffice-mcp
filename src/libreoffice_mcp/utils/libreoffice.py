@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Sequence
 
@@ -80,28 +81,35 @@ def run_headless(
     binary = resolve_libreoffice_binary(settings.libreoffice_path)
     timeout_s = timeout if timeout is not None else settings.conversion_timeout_seconds
 
-    cmd = [binary, "--headless", "--norestore", *args]
-    try:
-        proc = subprocess.run(
-            cmd,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise LibreOfficeError(
-            f"LibreOffice timed out after {timeout_s:.0f}s: {' '.join(cmd)}"
-        ) from exc
-    except OSError as exc:
-        raise LibreOfficeError(f"Failed to launch LibreOffice ({binary}): {exc}") from exc
+    # A fresh, disposable LibreOffice profile per call. Isolating the profile
+    # guarantees this call never reuses or locks another instance's profile
+    # (which is what made soffice.com hang/flake on Windows), and that no
+    # profile state accumulates between runs. The TemporaryDirectory is torn
+    # down automatically on success, timeout, or any exception.
+    with tempfile.TemporaryDirectory() as profile_dir:
+        profile_uri = Path(profile_dir).as_uri()
+        cmd = [binary, "--headless", "--norestore", f"-env:UserInstallation={profile_uri}", *args]
+        try:
+            proc = subprocess.run(
+                cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise LibreOfficeError(
+                f"LibreOffice timed out after {timeout_s:.0f}s: {' '.join(cmd)}"
+            ) from exc
+        except OSError as exc:
+            raise LibreOfficeError(f"Failed to launch LibreOffice ({binary}): {exc}") from exc
 
-    if check and proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip()
-        raise LibreOfficeError(
-            f"LibreOffice exited {proc.returncode}: {' '.join(cmd)}\n{detail}"
-        )
-    return proc
+        if check and proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()
+            raise LibreOfficeError(
+                f"LibreOffice exited {proc.returncode}: {' '.join(cmd)}\n{detail}"
+            )
+        return proc
 
 
 def get_version(settings: Settings, timeout: float = 15.0) -> str:
