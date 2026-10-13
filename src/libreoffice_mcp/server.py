@@ -16,7 +16,6 @@ from .config import load_settings
 
 app = typer.Typer(
     help="libreoffice-mcp: LibreOffice document server for MCP agents.",
-    no_args_is_help=True,
     add_completion=False,
 )
 
@@ -46,11 +45,7 @@ def version() -> None:
 
 
 @app.command()
-def serve(
-    timeout: int = typer.Option(
-        60, "--timeout", help="Seconds to wait for a LibreOffice call before failing."
-    ),
-) -> None:
+def serve() -> None:
     """Run the MCP stdio server (the mode agents connect over)."""
     # Surface configuration lazily so a bad LIBREOFFICE_PATH surfaces as a clear
     # error at runtime, not at import time.
