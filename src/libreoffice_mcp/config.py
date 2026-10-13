@@ -14,6 +14,7 @@ WORKING_DIR_ENV = "LIBREOFFICE_MCP_WORKING_DIR"
 AUTHOR_NAME_ENV = "LIBREOFFICE_MCP_AUTHOR_NAME"
 AUTHOR_INITIALS_ENV = "LIBREOFFICE_MCP_AUTHOR_INITIALS"
 CONVERSION_TIMEOUT_ENV = "LIBREOFFICE_MCP_CONVERSION_TIMEOUT"
+MAX_CONCURRENT_ENV = "LIBREOFFICE_MCP_MAX_CONCURRENT_CONVERSIONS"
 
 # Defaults per the roadmap.
 DEFAULT_BINARY = "libreoffice"
@@ -21,6 +22,7 @@ DEFAULT_WORKING_DIR = "~/Documents/libreoffice-mcp"
 DEFAULT_AUTHOR_NAME = "AI Assistant"
 DEFAULT_AUTHOR_INITIALS = "AI"
 DEFAULT_CONVERSION_TIMEOUT_SECONDS = 30
+DEFAULT_MAX_CONCURRENT_CONVERSIONS = 2
 
 
 def _default_working_dir() -> Path:
@@ -37,6 +39,7 @@ class Settings:
     author_name: str = DEFAULT_AUTHOR_NAME
     author_initials: str = DEFAULT_AUTHOR_INITIALS
     conversion_timeout_seconds: float = DEFAULT_CONVERSION_TIMEOUT_SECONDS
+    max_concurrent_conversions: int = DEFAULT_MAX_CONCURRENT_CONVERSIONS
 
     def effective_author_name(self, override: str | None = None) -> str:
         """Return the per-call override if given, else the configured name."""
@@ -60,6 +63,14 @@ def _parse_timeout(value: str) -> float:
     return parsed
 
 
+def _parse_max_concurrent(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        return DEFAULT_MAX_CONCURRENT_CONVERSIONS
+    return max(1, parsed)
+
+
 def load_settings(env: dict[str, str] | None = None) -> Settings:
     """Load settings from the environment.
 
@@ -76,6 +87,9 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         author_initials=env.get(AUTHOR_INITIALS_ENV, DEFAULT_AUTHOR_INITIALS),
         conversion_timeout_seconds=_parse_timeout(
             env.get(CONVERSION_TIMEOUT_ENV, str(DEFAULT_CONVERSION_TIMEOUT_SECONDS))
+        ),
+        max_concurrent_conversions=_parse_max_concurrent(
+            env.get(MAX_CONCURRENT_ENV, str(DEFAULT_MAX_CONCURRENT_CONVERSIONS))
         ),
     )
 

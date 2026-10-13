@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from typing import Sequence
 
@@ -66,6 +67,22 @@ def resolve_libreoffice_binary(path: str | None = None) -> str:
         "Could not locate a LibreOffice binary. Set LIBREOFFICE_PATH to the full "
         "path of the executable (e.g. C:\\Program Files\\LibreOffice\\program\\soffice.com)."
     )
+
+
+# Cap on simultaneous LibreOffice processes. Created lazily from the first
+# call's settings; the lock keeps two threads from creating two semaphores.
+_semaphore: threading.BoundedSemaphore | None = None
+_semaphore_lock = threading.Lock()
+
+
+def _get_semaphore(settings: Settings) -> threading.BoundedSemaphore:
+    global _semaphore
+    with _semaphore_lock:
+        if _semaphore is None:
+            _semaphore = threading.BoundedSemaphore(
+                max(1, settings.max_concurrent_conversions)
+            )
+        return _semaphore
 
 
 def _kill_process_tree(child: subprocess.Popen) -> None:
@@ -125,43 +142,53 @@ def run_headless(
     # (which is what made soffice.com hang/flake on Windows), and that no
     # profile state accumulates between runs. The TemporaryDirectory is torn
     # down automatically on success, timeout, or any exception.
-    with tempfile.TemporaryDirectory() as profile_dir:
-        profile_uri = Path(profile_dir).as_uri()
-        cmd = [binary, "--headless", "--norestore", f"-env:UserInstallation={profile_uri}", *args]
-        popen_kwargs: dict = {}
-        if sys.platform != "win32":
-            # Own session/process group so a timeout can kill the whole tree
-            # (the launcher script plus soffice.bin / oosplash), not just the launcher.
-            popen_kwargs["start_new_session"] = True
-        try:
-            child = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                **popen_kwargs,
-            )
-        except OSError as exc:
-            raise LibreOfficeError(f"Failed to launch LibreOffice ({binary}): {exc}") from exc
+    # Hold a concurrency slot from before the profile exists until the process
+    # tree is dead and the profile is deleted. Waiting for a slot happens here,
+    # before Popen, so it never counts against ``timeout`` (that clock starts
+    # inside communicate()).
+    semaphore = _get_semaphore(settings)
+    semaphore.acquire()
+    try:
+        with tempfile.TemporaryDirectory() as profile_dir:
+            profile_uri = Path(profile_dir).as_uri()
+            cmd = [binary, "--headless", "--norestore", f"-env:UserInstallation={profile_uri}", *args]
+            popen_kwargs: dict = {}
+            if sys.platform != "win32":
+                # Own session/process group so a timeout can kill the whole tree
+                # (the launcher script plus soffice.bin / oosplash), not just the launcher.
+                popen_kwargs["start_new_session"] = True
+            try:
+                child = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.DEVNULL,  # LibreOffice must never inherit the MCP stdio protocol pipe
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    **popen_kwargs,
+                )
+            except OSError as exc:
+                raise LibreOfficeError(f"Failed to launch LibreOffice ({binary}): {exc}") from exc
 
-        try:
-            stdout, stderr = child.communicate(timeout=timeout_s)
-        except subprocess.TimeoutExpired as exc:
-            _kill_process_tree(child)
-            raise LibreOfficeError(
-                f"LibreOffice timed out after {timeout_s:g}s: {' '.join(cmd)}"
-            ) from exc
-        except BaseException:
-            _kill_process_tree(child)
-            raise
-        proc = subprocess.CompletedProcess(cmd, child.returncode, stdout, stderr)
+            try:
+                stdout, stderr = child.communicate(timeout=timeout_s)
+            except subprocess.TimeoutExpired as exc:
+                _kill_process_tree(child)
+                raise LibreOfficeError(
+                    f"LibreOffice timed out after {timeout_s:g}s: {' '.join(cmd)}"
+                ) from exc
+            except BaseException:
+                _kill_process_tree(child)
+                raise
+            proc = subprocess.CompletedProcess(cmd, child.returncode, stdout, stderr)
 
-        if check and proc.returncode != 0:
-            detail = (proc.stderr or proc.stdout or "").strip()
-            raise LibreOfficeError(
-                f"LibreOffice exited {proc.returncode}: {' '.join(cmd)}\n{detail}"
-            )
-        return proc
+            if check and proc.returncode != 0:
+                detail = (proc.stderr or proc.stdout or "").strip()
+                raise LibreOfficeError(
+                    f"LibreOffice exited {proc.returncode}: {' '.join(cmd)}\n{detail}"
+                )
+            return proc
+    finally:
+        semaphore.release()
 
 
 def get_version(settings: Settings, timeout: float = 15.0) -> str:
