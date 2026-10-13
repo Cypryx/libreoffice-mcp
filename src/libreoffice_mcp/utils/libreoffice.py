@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Sequence
@@ -66,6 +68,43 @@ def resolve_libreoffice_binary(path: str | None = None) -> str:
     )
 
 
+def _kill_process_tree(child: subprocess.Popen) -> None:
+    """Kill ``child`` and every process it spawned, then reap it."""
+    if sys.platform == "win32":
+        # Windows: soffice.com launches soffice.bin as a child. taskkill /T /F
+        # terminates the whole tree rooted at the launcher's PID.
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(child.pid)],
+            check=False,
+            capture_output=True,
+        )
+    else:
+        # POSIX: the child leads its own process group (start_new_session=True).
+        # Ask politely, wait briefly, then SIGKILL whatever is left.
+        try:
+            pgid = os.getpgid(child.pid)
+        except ProcessLookupError:
+            pgid = None
+        if pgid is not None:
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                child.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    try:
+        child.communicate(timeout=5)  # reap and close pipes
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.communicate()
+
+
 def run_headless(
     *args: str,
     settings: Settings,
@@ -89,20 +128,33 @@ def run_headless(
     with tempfile.TemporaryDirectory() as profile_dir:
         profile_uri = Path(profile_dir).as_uri()
         cmd = [binary, "--headless", "--norestore", f"-env:UserInstallation={profile_uri}", *args]
+        popen_kwargs: dict = {}
+        if sys.platform != "win32":
+            # Own session/process group so a timeout can kill the whole tree
+            # (the launcher script plus soffice.bin / oosplash), not just the launcher.
+            popen_kwargs["start_new_session"] = True
         try:
-            proc = subprocess.run(
+            child = subprocess.Popen(
                 cmd,
-                check=False,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout_s,
+                **popen_kwargs,
             )
-        except subprocess.TimeoutExpired as exc:
-            raise LibreOfficeError(
-                f"LibreOffice timed out after {timeout_s:.0f}s: {' '.join(cmd)}"
-            ) from exc
         except OSError as exc:
             raise LibreOfficeError(f"Failed to launch LibreOffice ({binary}): {exc}") from exc
+
+        try:
+            stdout, stderr = child.communicate(timeout=timeout_s)
+        except subprocess.TimeoutExpired as exc:
+            _kill_process_tree(child)
+            raise LibreOfficeError(
+                f"LibreOffice timed out after {timeout_s:g}s: {' '.join(cmd)}"
+            ) from exc
+        except BaseException:
+            _kill_process_tree(child)
+            raise
+        proc = subprocess.CompletedProcess(cmd, child.returncode, stdout, stderr)
 
         if check and proc.returncode != 0:
             detail = (proc.stderr or proc.stdout or "").strip()
