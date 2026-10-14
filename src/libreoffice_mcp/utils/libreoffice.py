@@ -30,6 +30,14 @@ class LibreOfficeError(RuntimeError):
     """Raised when the LibreOffice binary is missing or a conversion fails."""
 
 
+class LibreOfficeTimeout(LibreOfficeError):
+    """Raised when a headless LibreOffice run exceeds its timeout."""
+
+
+class LibreOfficeNotFound(LibreOfficeError):
+    """Raised when no LibreOffice binary can be located."""
+
+
 def resolve_libreoffice_binary(path: str | None = None) -> str:
     """Return the path to the LibreOffice binary to invoke.
 
@@ -63,7 +71,7 @@ def resolve_libreoffice_binary(path: str | None = None) -> str:
             if candidate.is_file():
                 return str(candidate)
 
-    raise LibreOfficeError(
+    raise LibreOfficeNotFound(
         "Could not locate a LibreOffice binary. Set LIBREOFFICE_PATH to the full "
         "path of the executable (e.g. C:\\Program Files\\LibreOffice\\program\\soffice.com)."
     )
@@ -173,7 +181,7 @@ def run_headless(
                 stdout, stderr = child.communicate(timeout=timeout_s)
             except subprocess.TimeoutExpired as exc:
                 _kill_process_tree(child)
-                raise LibreOfficeError(
+                raise LibreOfficeTimeout(
                     f"LibreOffice timed out after {timeout_s:g}s: {' '.join(cmd)}"
                 ) from exc
             except BaseException:
